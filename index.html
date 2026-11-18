@@ -325,6 +325,7 @@
     let showGrid = true;
     let showDebug = false;
     let selected = null;
+    const explored = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -390,14 +391,15 @@
       ctx.lineCap = "square";
       for (let row = 0; row < ROWS; row++) {
         for (let col = 0; col < COLS; col++) {
+          if (!squareRevealed(col, row)) continue;
           const walls = board.cells[row][col].walls;
           const x = layout.gridX + col * cellW;
           const y = layout.gridY + row * cellH;
-          if (walls.north && (row === 0 || !board.cells[row - 1][col].walls.south)) {
+          if (walls.north) {
             ctx.moveTo(x, y);
             ctx.lineTo(x + cellW, y);
           }
-          if (walls.west && (col === 0 || !board.cells[row][col - 1].walls.east)) {
+          if (walls.west) {
             ctx.moveTo(x, y);
             ctx.lineTo(x, y + cellH);
           }
@@ -422,7 +424,7 @@
       for (let row = 0; row < ROWS; row++) {
         for (let col = 0; col < COLS; col++) {
           const roomId = board.cells[row][col].roomId;
-          if (roomId === null) continue;
+          if (roomId === null || !squareRevealed(col, row)) continue;
           const x = layout.gridX + (col + 0.5) * cellW;
           const y = layout.gridY + (row + 0.5) * cellH;
           ctx.strokeText(String(roomId), x, y);
@@ -478,8 +480,17 @@
       return questSettings.objectiveRoomId !== null && cell.roomId === questSettings.objectiveRoomId;
     }
 
-    function doorEdgeSet() {
-      return new Set(quest.doors.map((door) => door.key));
+    function makeDoor(edge) {
+      return { ...edge, open: false, visible: true };
+    }
+
+    function doorEdgeSet(openOnly = false) {
+      const keys = [];
+      for (const door of quest.doors) {
+        if (openOnly && !door.open) continue;
+        keys.push(door.key);
+      }
+      return new Set(keys);
     }
 
     function passageOpen(col, row, side, doors) {
@@ -515,6 +526,77 @@
         }
       }
       return seen.size === free;
+    }
+
+    function squareRevealed(col, row) {
+      return questSettings.revealAll || explored[row][col];
+    }
+
+    function resetExploration() {
+      for (let row = 0; row < ROWS; row++) explored[row].fill(false);
+      selected = null;
+    }
+
+    // Center-to-center grid ray. A wall, a shut door, or a rock stops the ray.
+    // Corner crossings are blocked when any edge meeting that corner is a wall,
+    // so vision cannot slip between two wall ends.
+    function hasLineOfSight(c0, r0, c1, r1, doors, rocks) {
+      if (c0 === c1 && r0 === r1) return true;
+
+      const dx = c1 - c0;
+      const dy = r1 - r0;
+      const stepCol = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+      const stepRow = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+      const tDeltaCol = stepCol === 0 ? Infinity : Math.abs(1 / dx);
+      const tDeltaRow = stepRow === 0 ? Infinity : Math.abs(1 / dy);
+      let tMaxCol = stepCol === 0 ? Infinity : tDeltaCol * 0.5;
+      let tMaxRow = stepRow === 0 ? Infinity : tDeltaRow * 0.5;
+      let col = c0;
+      let row = r0;
+
+      const limit = Math.abs(dx) + Math.abs(dy) + 1;
+      for (let i = 0; i < limit; i++) {
+        const corner = tMaxCol !== Infinity && tMaxRow !== Infinity &&
+          Math.abs(tMaxCol - tMaxRow) <= 1e-8 * Math.max(1, tMaxCol, tMaxRow);
+        if (corner) {
+          const sideCol = stepCol > 0 ? "east" : "west";
+          const sideRow = stepRow > 0 ? "south" : "north";
+          const nextCol = col + stepCol;
+          const nextRow = row + stepRow;
+          if (nextCol < 0 || nextRow < 0 || nextCol >= COLS || nextRow >= ROWS) return false;
+          if (!passageOpen(col, row, sideCol, doors) || !passageOpen(col, row, sideRow, doors)) return false;
+          if (!passageOpen(nextCol, row, sideRow, doors) || !passageOpen(col, nextRow, sideCol, doors)) return false;
+          if (rocks.has(squareKey(nextCol, row)) || rocks.has(squareKey(col, nextRow))) return false;
+          col = nextCol;
+          row = nextRow;
+          tMaxCol += tDeltaCol;
+          tMaxRow += tDeltaRow;
+        } else if (tMaxCol < tMaxRow) {
+          if (!passageOpen(col, row, stepCol > 0 ? "east" : "west", doors)) return false;
+          col += stepCol;
+          tMaxCol += tDeltaCol;
+        } else {
+          if (!passageOpen(col, row, stepRow > 0 ? "south" : "north", doors)) return false;
+          row += stepRow;
+          tMaxRow += tDeltaRow;
+        }
+
+        if (col < 0 || row < 0 || col >= COLS || row >= ROWS) return false;
+        if (col === c1 && row === r1) return true;
+        if (rocks.has(squareKey(col, row))) return false;
+      }
+      return false;
+    }
+
+    function revealFrom(col, row) {
+      const doors = doorEdgeSet(true);
+      const rocks = new Set(quest.rocks.map((rock) => squareKey(rock.col, rock.row)));
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (explored[r][c]) continue;
+          if (hasLineOfSight(col, row, c, r, doors, rocks)) explored[r][c] = true;
+        }
+      }
     }
 
     function shuffle(list) {
@@ -610,7 +692,7 @@
         if (left === right) continue;
         sets.union(left, right);
         claimSlots(edge, usedSlots);
-        quest.doors.push({ ...edge, visible: true });
+        quest.doors.push(makeDoor(edge));
       }
     }
 
@@ -638,7 +720,7 @@
         const edge = extras.pop();
         if (!slotsFree(edge, usedSlots)) continue;
         claimSlots(edge, usedSlots);
-        quest.doors.push({ ...edge, visible: true });
+        quest.doors.push(makeDoor(edge));
       }
     }
 
@@ -715,6 +797,7 @@
     function generateQuest() {
       syncQuestSettings();
       clearQuest();
+      resetExploration();
       const counts = QUEST_COUNTS[questSettings.difficulty] || QUEST_COUNTS.normal;
       placeDoors(counts.doors);
       placeRocks(counts.rocks);
@@ -752,7 +835,7 @@
 
       ctx.save();
       for (const rock of quest.rocks) {
-        if (rock.visible === false) continue;
+        if (rock.visible === false || !squareRevealed(rock.col, rock.row)) continue;
         drawToken(
           layout.gridX + (rock.col + 0.5) * cellW,
           layout.gridY + (rock.row + 0.5) * cellH,
@@ -761,7 +844,7 @@
         );
       }
       for (const chest of quest.chests) {
-        if (chest.visible === false) continue;
+        if (chest.visible === false || !squareRevealed(chest.col, chest.row)) continue;
         drawToken(
           layout.gridX + (chest.col + 0.5) * cellW,
           layout.gridY + (chest.row + 0.5) * cellH,
@@ -770,7 +853,7 @@
         );
       }
       for (const monster of quest.monsters) {
-        if (monster.visible === false) continue;
+        if (monster.visible === false || !squareRevealed(monster.col, monster.row)) continue;
         const type = MONSTER_TYPES.find((entry) => entry.id === monster.typeId);
         if (!type) continue;
         drawToken(
@@ -780,20 +863,59 @@
           type
         );
       }
-      for (const door of quest.doors) {
-        if (door.visible === false) continue;
-        const x = layout.gridX + door.col * cellW;
-        const y = layout.gridY + door.row * cellH;
-        const along = door.side === "east";
-        const cx = along ? x + cellW : x + cellW / 2;
-        const cy = along ? y + cellH / 2 : y + cellH;
-        const width = along ? cellW * 0.22 : cellW * 0.5;
-        const height = along ? cellH * 0.5 : cellH * 0.22;
-        ctx.fillStyle = PLACEABLE_STYLES.door.color;
-        ctx.fillRect(cx - width / 2, cy - height / 2, width, height);
-        drawToken(cx, cy, Math.min(cellW, cellH) * 0.2, PLACEABLE_STYLES.door);
-      }
+      for (const door of quest.doors) drawDoor(door, layout);
       ctx.restore();
+    }
+
+    function doorShown(door) {
+      if (door.visible === false) return false;
+      if (squareRevealed(door.col, door.row)) return true;
+      const other = stepTo(door.col, door.row, door.side);
+      return !!(other && squareRevealed(other.col, other.row));
+    }
+
+    function doorFrame(door, layout) {
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      const x = layout.gridX + door.col * cellW;
+      const y = layout.gridY + door.row * cellH;
+      const vertical = door.side === "east";
+      return {
+        cx: vertical ? x + cellW : x + cellW / 2,
+        cy: vertical ? y + cellH / 2 : y + cellH,
+        width: vertical ? cellW * 0.28 : cellW * 0.62,
+        height: vertical ? cellH * 0.62 : cellH * 0.28,
+        token: Math.min(cellW, cellH) * 0.2,
+      };
+    }
+
+    function drawDoor(door, layout) {
+      if (!doorShown(door)) return;
+      const frame = doorFrame(door, layout);
+      const left = frame.cx - frame.width / 2;
+      const top = frame.cy - frame.height / 2;
+      ctx.fillStyle = PLACEABLE_STYLES.door.color;
+      if (door.open) {
+        ctx.strokeStyle = PLACEABLE_STYLES.door.color;
+        ctx.lineWidth = Math.max(2, (window.devicePixelRatio || 1) * 1.5);
+        ctx.strokeRect(left, top, frame.width, frame.height);
+      } else {
+        ctx.fillRect(left, top, frame.width, frame.height);
+      }
+      drawToken(frame.cx, frame.cy, frame.token, PLACEABLE_STYLES.door);
+    }
+
+    function doorAtPoint(px, py, layout) {
+      for (let i = quest.doors.length - 1; i >= 0; i--) {
+        const door = quest.doors[i];
+        if (!doorShown(door)) continue;
+        const frame = doorFrame(door, layout);
+        const pad = frame.token * 0.35;
+        if (Math.abs(px - frame.cx) <= frame.width / 2 + pad && Math.abs(py - frame.cy) <= frame.height / 2 + pad) {
+          return door;
+        }
+      }
+      return null;
     }
 
     function drawHighlight(layout) {
@@ -812,16 +934,42 @@
       ctx.restore();
     }
 
+    function drawFog(layout) {
+      if (questSettings.revealAll) return;
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      ctx.save();
+      ctx.fillStyle = "#050505";
+      let anyRevealed = false;
+      for (let row = 0; row < ROWS && !anyRevealed; row++) {
+        anyRevealed = explored[row].some(Boolean);
+      }
+      if (!anyRevealed) {
+        ctx.fillRect(layout.gridX, layout.gridY, layout.gridW, layout.gridH);
+      } else {
+        for (let row = 0; row < ROWS; row++) {
+          for (let col = 0; col < COLS; col++) {
+            if (explored[row][col]) continue;
+            const x = layout.gridX + col * cellW;
+            const y = layout.gridY + row * cellH;
+            ctx.fillRect(x - 0.75, y - 0.75, cellW + 1.5, cellH + 1.5);
+          }
+        }
+      }
+      ctx.restore();
+    }
+
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (!image.complete || image.naturalWidth === 0) return;
 
       const layout = boardLayout();
       ctx.drawImage(image, layout.x, layout.y, layout.width, layout.height);
+      drawFog(layout);
       if (showGrid) drawGrid(layout);
       if (showDebug) drawDebug(layout);
-      drawQuest(layout);
       drawHighlight(layout);
+      drawQuest(layout);
     }
 
     canvas.addEventListener("click", (event) => {
@@ -831,11 +979,21 @@
       const px = (event.clientX - rect.left) * (canvas.width / rect.width);
       const py = (event.clientY - rect.top) * (canvas.height / rect.height);
       const layout = boardLayout();
+      const door = doorAtPoint(px, py, layout);
+      if (door) {
+        door.open = !door.open;
+        if (selected) revealFrom(selected.col, selected.row);
+        console.log((door.open ? "Opened" : "Shut") + " door", squareLabel(door.col, door.row) + " " + door.side);
+        draw();
+        return;
+      }
+
       const col = Math.floor((px - layout.gridX) / (layout.gridW / COLS));
       const row = Math.floor((py - layout.gridY) / (layout.gridH / ROWS));
       if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
 
       selected = { col, row };
+      revealFrom(col, row);
       const cell = board.cell(col, row);
       console.log(squareLabel(col, row), {
         isRoom: cell.isRoom,
@@ -891,9 +1049,6 @@
 
     revealAll.addEventListener("change", () => {
       syncQuestSettings();
-      for (const item of [...quest.doors, ...quest.rocks, ...quest.chests, ...quest.monsters]) {
-        item.visible = questSettings.revealAll;
-      }
       console.log("Reveal All", questSettings.revealAll);
       draw();
     });
