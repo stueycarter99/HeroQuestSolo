@@ -12,16 +12,153 @@
       overflow: hidden;
     }
 
+    body {
+      display: flex;
+    }
+
     canvas {
       display: block;
-      width: 100vw;
-      height: 100vh;
+      flex: 1 1 auto;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      cursor: pointer;
+    }
+
+    .panel-toggle {
+      position: absolute;
+      z-index: 3;
+      top: 16px;
+      right: 16px;
+      padding: 8px 14px;
+      border: 1px solid #8c7342;
+      border-radius: 6px;
+      background: #1c1a17;
+      color: #f3ead7;
+      font: 600 14px/1.2 system-ui, sans-serif;
+      cursor: pointer;
+    }
+
+    body.panel-open .panel-toggle {
+      right: calc(280px + 16px);
+    }
+
+    .quest-panel {
+      display: none;
+      box-sizing: border-box;
+      flex: 0 0 280px;
+      width: 280px;
+      height: 100%;
+      padding: 20px 18px;
+      overflow: auto;
+      background: #1c1a17;
+      color: #f3ead7;
+      border-left: 1px solid #3d362c;
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+
+    body.panel-open .quest-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .quest-panel h2 {
+      margin: 28px 0 0;
+      font-size: 18px;
+      letter-spacing: 0.04em;
+    }
+
+    .quest-panel fieldset {
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+
+    .quest-panel legend {
+      margin-bottom: 8px;
+      color: #c7b48a;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .quest-panel fieldset label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+      cursor: pointer;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      color: #c7b48a;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .quest-panel select {
+      padding: 8px;
+      border: 1px solid #5c5348;
+      border-radius: 6px;
+      background: #111;
+      color: #f3ead7;
+      font: 14px/1.3 system-ui, sans-serif;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    #generate-quest {
+      padding: 10px 12px;
+      border: 0;
+      border-radius: 6px;
+      background: #e2c27a;
+      color: #1c1a17;
+      font: 700 14px/1.2 system-ui, sans-serif;
+      cursor: pointer;
+    }
+
+    #generate-quest:hover {
+      background: #efd7a0;
+    }
+
+    .reveal {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       cursor: pointer;
     }
   </style>
 </head>
 <body>
   <canvas id="board"></canvas>
+  <button id="panel-toggle" class="panel-toggle" type="button" aria-expanded="false" aria-controls="quest-panel">Quest</button>
+  <aside id="quest-panel" class="quest-panel" aria-hidden="true">
+    <h2>Quest</h2>
+    <fieldset>
+      <legend>Difficulty</legend>
+      <label><input type="radio" name="difficulty" value="easy"> Easy</label>
+      <label><input type="radio" name="difficulty" value="normal" checked> Normal</label>
+      <label><input type="radio" name="difficulty" value="hard"> Hard</label>
+    </fieldset>
+    <label class="field" for="objective-room">
+      Objective room
+      <select id="objective-room">
+        <option value="">None</option>
+      </select>
+    </label>
+    <button id="generate-quest" type="button">Generate New Quest</button>
+    <label class="reveal">
+      <input id="reveal-all" type="checkbox">
+      Reveal All
+    </label>
+  </aside>
   <script>
     const COLS = 26;
     const ROWS = 19;
@@ -191,8 +328,8 @@
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(window.innerWidth * dpr);
-      canvas.height = Math.round(window.innerHeight * dpr);
+      canvas.width = Math.round(canvas.clientWidth * dpr);
+      canvas.height = Math.round(canvas.clientHeight * dpr);
       draw();
     }
 
@@ -295,6 +432,370 @@
       ctx.restore();
     }
 
+    const MONSTER_TYPES = [
+      { id: "skeleton", name: "Skeleton", color: "#d5dde8", letter: "S", text: "#1a1a1a" },
+      { id: "zombie", name: "Zombie", color: "#3f9a55", letter: "Z", text: "#f4fff5" },
+    ];
+
+    const PLACEABLE_STYLES = {
+      chest: { color: "#e2b340", letter: "C", text: "#1a1a1a" },
+      rock: { color: "#8d8478", letter: "R", text: "#1a1a1a" },
+      door: { color: "#3d9ad4", letter: "D", text: "#f4fbff" },
+    };
+
+    const QUEST_COUNTS = {
+      easy: { doors: 24, rocks: 4, chests: 3, monsters: 6 },
+      normal: { doors: 24, rocks: 8, chests: 5, monsters: 12 },
+      hard: { doors: 24, rocks: 14, chests: 8, monsters: 18 },
+    };
+
+    const quest = {
+      doors: [],
+      rocks: [],
+      chests: [],
+      monsters: [],
+    };
+
+    function squareKey(col, row) {
+      return col + "," + row;
+    }
+
+    function edgeKey(col, row, side) {
+      if (side === "west") return edgeKey(col - 1, row, "east");
+      if (side === "north") return edgeKey(col, row - 1, "south");
+      return col + "," + row + "," + side;
+    }
+
+    function stepTo(col, row, side) {
+      const { dc, dr } = STEP[side];
+      const nextCol = col + dc;
+      const nextRow = row + dr;
+      if (nextRow < 0 || nextCol < 0 || nextRow >= ROWS || nextCol >= COLS) return null;
+      return board.cells[nextRow][nextCol];
+    }
+
+    function isObjective(cell) {
+      return questSettings.objectiveRoomId !== null && cell.roomId === questSettings.objectiveRoomId;
+    }
+
+    function doorEdgeSet() {
+      return new Set(quest.doors.map((door) => door.key));
+    }
+
+    function passageOpen(col, row, side, doors) {
+      const cell = board.cells[row][col];
+      if (!cell.walls[side]) return true;
+      return doors.has(edgeKey(col, row, side));
+    }
+
+    function allSquaresReachable(blocked, doors) {
+      let free = 0;
+      let start = null;
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          if (blocked.has(squareKey(col, row))) continue;
+          free++;
+          if (!start) start = [col, row];
+        }
+      }
+      if (!start) return true;
+
+      const seen = new Set([squareKey(start[0], start[1])]);
+      const stack = [start];
+      while (stack.length) {
+        const [col, row] = stack.pop();
+        for (const side of SIDES) {
+          if (!passageOpen(col, row, side, doors)) continue;
+          const next = stepTo(col, row, side);
+          if (!next) continue;
+          const key = squareKey(next.col, next.row);
+          if (blocked.has(key) || seen.has(key)) continue;
+          seen.add(key);
+          stack.push([next.col, next.row]);
+        }
+      }
+      return seen.size === free;
+    }
+
+    function shuffle(list) {
+      for (let i = list.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [list[i], list[j]] = [list[j], list[i]];
+      }
+      return list;
+    }
+
+    function regionOf(cell) {
+      return cell.isRoom ? "room:" + cell.roomId : "corridor";
+    }
+
+    function wallEdges() {
+      const edges = [];
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const cell = board.cells[row][col];
+          for (const side of ["east", "south"]) {
+            if (!cell.walls[side]) continue;
+            const other = stepTo(col, row, side);
+            if (!other) continue;
+            if (isObjective(cell) && isObjective(other)) continue;
+            edges.push({
+              col,
+              row,
+              side,
+              key: edgeKey(col, row, side),
+              touchesObjective: isObjective(cell) || isObjective(other),
+            });
+          }
+        }
+      }
+      return edges;
+    }
+
+    // A room side may have one door toward a corridor, plus another only when
+    // that side also opens into a different room.
+    function wallSlots(edge) {
+      const here = board.cells[edge.row][edge.col];
+      const other = stepTo(edge.col, edge.row, edge.side);
+      const slots = [];
+      if (here.isRoom) slots.push(here.roomId + "|" + edge.side + "|" + regionOf(other));
+      if (other.isRoom) {
+        slots.push(other.roomId + "|" + OPPOSITE[edge.side] + "|" + regionOf(here));
+      }
+      return slots;
+    }
+
+    function slotsFree(edge, usedSlots) {
+      return wallSlots(edge).every((slot) => !usedSlots.has(slot));
+    }
+
+    function claimSlots(edge, usedSlots) {
+      for (const slot of wallSlots(edge)) usedSlots.add(slot);
+    }
+
+    function makeDisjointSets() {
+      const parent = Array.from({ length: ROWS * COLS }, (_, index) => index);
+      function find(index) {
+        let cursor = index;
+        while (parent[cursor] !== cursor) {
+          parent[cursor] = parent[parent[cursor]];
+          cursor = parent[cursor];
+        }
+        return cursor;
+      }
+      function union(a, b) {
+        const left = find(a);
+        const right = find(b);
+        if (left !== right) parent[left] = right;
+      }
+      function index(col, row) {
+        return row * COLS + col;
+      }
+      function groups() {
+        const roots = new Set();
+        for (let row = 0; row < ROWS; row++) {
+          for (let col = 0; col < COLS; col++) roots.add(find(index(col, row)));
+        }
+        return roots.size;
+      }
+      return { find, union, index, groups };
+    }
+
+    function connectByDoors(sets, edges, usedSlots) {
+      for (const edge of shuffle(edges.slice())) {
+        if (!slotsFree(edge, usedSlots)) continue;
+        const other = stepTo(edge.col, edge.row, edge.side);
+        const left = sets.find(sets.index(edge.col, edge.row));
+        const right = sets.find(sets.index(other.col, other.row));
+        if (left === right) continue;
+        sets.union(left, right);
+        claimSlots(edge, usedSlots);
+        quest.doors.push({ ...edge, visible: true });
+      }
+    }
+
+    function placeDoors(target) {
+      const sets = makeDisjointSets();
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          for (const side of ["east", "south"]) {
+            if (board.cells[row][col].walls[side]) continue;
+            const other = stepTo(col, row, side);
+            if (!other) continue;
+            sets.union(sets.index(col, row), sets.index(other.col, other.row));
+          }
+        }
+      }
+
+      const edges = wallEdges();
+      const usedSlots = new Set();
+      connectByDoors(sets, edges.filter((edge) => !edge.touchesObjective), usedSlots);
+      connectByDoors(sets, edges.filter((edge) => edge.touchesObjective), usedSlots);
+
+      const used = doorEdgeSet();
+      const extras = shuffle(edges.filter((edge) => !edge.touchesObjective && !used.has(edge.key)));
+      while (quest.doors.length < target && extras.length) {
+        const edge = extras.pop();
+        if (!slotsFree(edge, usedSlots)) continue;
+        claimSlots(edge, usedSlots);
+        quest.doors.push({ ...edge, visible: true });
+      }
+    }
+
+    function emptyFloorSquares() {
+      const taken = new Set([
+        ...quest.rocks.map((item) => squareKey(item.col, item.row)),
+        ...quest.chests.map((item) => squareKey(item.col, item.row)),
+        ...quest.monsters.map((item) => squareKey(item.col, item.row)),
+      ]);
+      const squares = [];
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const cell = board.cells[row][col];
+          if (isObjective(cell) || taken.has(squareKey(col, row))) continue;
+          squares.push(cell);
+        }
+      }
+      return squares;
+    }
+
+    function placeRocks(count) {
+      const doors = doorEdgeSet();
+      const blocked = new Set(quest.rocks.map((rock) => squareKey(rock.col, rock.row)));
+      for (const cell of shuffle(emptyFloorSquares().filter((square) => !square.isRoom))) {
+        if (quest.rocks.length >= count) break;
+        const key = squareKey(cell.col, cell.row);
+        blocked.add(key);
+        if (!allSquaresReachable(blocked, doors)) {
+          blocked.delete(key);
+          continue;
+        }
+        quest.rocks.push({ col: cell.col, row: cell.row, visible: true });
+      }
+    }
+
+    function placeChests(count) {
+      for (const cell of shuffle(emptyFloorSquares().filter((square) => square.isRoom))) {
+        if (quest.chests.length >= count) break;
+        quest.chests.push({ col: cell.col, row: cell.row, visible: true });
+      }
+    }
+
+    function placeMonsters(count) {
+      const pool = emptyFloorSquares();
+      for (let placed = 0; placed < count && pool.length; placed++) {
+        const weights = pool.map((cell) => (cell.isRoom ? 4 : 1));
+        let roll = Math.random() * weights.reduce((sum, weight) => sum + weight, 0);
+        let index = pool.length - 1;
+        for (let i = 0; i < pool.length; i++) {
+          roll -= weights[i];
+          if (roll <= 0) {
+            index = i;
+            break;
+          }
+        }
+        const cell = pool.splice(index, 1)[0];
+        const type = MONSTER_TYPES[Math.floor(Math.random() * MONSTER_TYPES.length)];
+        quest.monsters.push({
+          col: cell.col,
+          row: cell.row,
+          typeId: type.id,
+          visible: true,
+        });
+      }
+    }
+
+    function clearQuest() {
+      quest.doors.length = 0;
+      quest.rocks.length = 0;
+      quest.chests.length = 0;
+      quest.monsters.length = 0;
+    }
+
+    function generateQuest() {
+      syncQuestSettings();
+      clearQuest();
+      const counts = QUEST_COUNTS[questSettings.difficulty] || QUEST_COUNTS.normal;
+      placeDoors(counts.doors);
+      placeRocks(counts.rocks);
+      placeChests(counts.chests);
+      placeMonsters(counts.monsters);
+      console.log(
+        "Placed " + quest.monsters.length + " monsters, " +
+        quest.rocks.length + " rocks, " +
+        quest.chests.length + " chests, " +
+        quest.doors.length + " doors",
+        { ...questSettings }
+      );
+      draw();
+    }
+
+    function drawToken(cx, cy, radius, style) {
+      ctx.beginPath();
+      ctx.fillStyle = style.color;
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = Math.max(1, radius * 0.12);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.stroke();
+      ctx.fillStyle = style.text;
+      ctx.font = "bold " + Math.round(radius * 1.15) + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(style.letter, cx, cy + radius * 0.05);
+    }
+
+    function drawQuest(layout) {
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      const radius = Math.min(cellW, cellH) * 0.32;
+
+      ctx.save();
+      for (const rock of quest.rocks) {
+        if (rock.visible === false) continue;
+        drawToken(
+          layout.gridX + (rock.col + 0.5) * cellW,
+          layout.gridY + (rock.row + 0.5) * cellH,
+          radius,
+          PLACEABLE_STYLES.rock
+        );
+      }
+      for (const chest of quest.chests) {
+        if (chest.visible === false) continue;
+        drawToken(
+          layout.gridX + (chest.col + 0.5) * cellW,
+          layout.gridY + (chest.row + 0.5) * cellH,
+          radius,
+          PLACEABLE_STYLES.chest
+        );
+      }
+      for (const monster of quest.monsters) {
+        if (monster.visible === false) continue;
+        const type = MONSTER_TYPES.find((entry) => entry.id === monster.typeId);
+        if (!type) continue;
+        drawToken(
+          layout.gridX + (monster.col + 0.5) * cellW,
+          layout.gridY + (monster.row + 0.5) * cellH,
+          radius,
+          type
+        );
+      }
+      for (const door of quest.doors) {
+        if (door.visible === false) continue;
+        const x = layout.gridX + door.col * cellW;
+        const y = layout.gridY + door.row * cellH;
+        const along = door.side === "east";
+        const cx = along ? x + cellW : x + cellW / 2;
+        const cy = along ? y + cellH / 2 : y + cellH;
+        const width = along ? cellW * 0.22 : cellW * 0.5;
+        const height = along ? cellH * 0.5 : cellH * 0.22;
+        ctx.fillStyle = PLACEABLE_STYLES.door.color;
+        ctx.fillRect(cx - width / 2, cy - height / 2, width, height);
+        drawToken(cx, cy, Math.min(cellW, cellH) * 0.2, PLACEABLE_STYLES.door);
+      }
+      ctx.restore();
+    }
+
     function drawHighlight(layout) {
       if (!selected) return;
       const cellW = layout.gridW / COLS;
@@ -319,6 +820,7 @@
       ctx.drawImage(image, layout.x, layout.y, layout.width, layout.height);
       if (showGrid) drawGrid(layout);
       if (showDebug) drawDebug(layout);
+      drawQuest(layout);
       drawHighlight(layout);
     }
 
@@ -343,6 +845,59 @@
       draw();
     });
 
+    const questSettings = {
+      difficulty: "normal",
+      objectiveRoomId: null,
+      revealAll: false,
+    };
+
+    const panelToggle = document.getElementById("panel-toggle");
+    const questPanel = document.getElementById("quest-panel");
+    const objectiveRoom = document.getElementById("objective-room");
+    const revealAll = document.getElementById("reveal-all");
+
+    for (const room of board.rooms) {
+      if (!room) continue;
+      const option = document.createElement("option");
+      option.value = String(room.id);
+      option.textContent = "Room " + room.id;
+      objectiveRoom.append(option);
+    }
+
+    function syncQuestSettings() {
+      questSettings.difficulty = document.querySelector('input[name="difficulty"]:checked').value;
+      questSettings.objectiveRoomId = objectiveRoom.value === "" ? null : Number(objectiveRoom.value);
+      questSettings.revealAll = revealAll.checked;
+    }
+
+    function setPanelOpen(open) {
+      document.body.classList.toggle("panel-open", open);
+      panelToggle.setAttribute("aria-expanded", String(open));
+      questPanel.setAttribute("aria-hidden", String(!open));
+      panelToggle.textContent = open ? "Hide" : "Quest";
+      requestAnimationFrame(resize);
+    }
+
+    panelToggle.addEventListener("click", () => {
+      setPanelOpen(!document.body.classList.contains("panel-open"));
+    });
+
+    document.querySelectorAll('input[name="difficulty"]').forEach((input) => {
+      input.addEventListener("change", syncQuestSettings);
+    });
+    objectiveRoom.addEventListener("change", syncQuestSettings);
+
+    document.getElementById("generate-quest").addEventListener("click", generateQuest);
+
+    revealAll.addEventListener("change", () => {
+      syncQuestSettings();
+      for (const item of [...quest.doors, ...quest.rocks, ...quest.chests, ...quest.monsters]) {
+        item.visible = questSettings.revealAll;
+      }
+      console.log("Reveal All", questSettings.revealAll);
+      draw();
+    });
+
     window.addEventListener("keydown", (event) => {
       if (event.repeat) return;
       if (event.key === "g" || event.key === "G") {
@@ -353,6 +908,8 @@
         draw();
       }
     });
+
+    window.quest = quest;
 
     image.addEventListener("load", draw);
     window.addEventListener("resize", resize);
