@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HeroQuest</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #111;
+      overflow: hidden;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="board"></canvas>
+  <script>
+    const COLS = 26;
+    const ROWS = 19;
+    // Playable squares in board.jpeg pixels: columns A–Z, rows 1–19 from the top.
+    const GRID = { x: 5.82, y: 3.73, width: 604.69, height: 443.57 };
+
+    // Classic European board, transcribed from HeroScribe's Board_EU room strokes.
+    // Each rectangle is [x, y, width, height] in squares. HeroScribe's origin is the
+    // bottom-left, beside the logo (column A, rank 1). This file numbers row 1 from
+    // the top of the picture, so createBoard() flips y when it builds the cells.
+    // A stroke is the wall around those squares. Overlapping rectangles are the
+    // internal walls that divide a block into separate rooms.
+    const CLASSIC_ROOM_RECTS = [
+      [10, 7, 6, 5],   // central chamber
+      [1, 1, 8, 8],    // lower-left block
+      [9, 1, 3, 5],
+      [5, 1, 4, 5],
+      [1, 5, 4, 4],
+      [5, 6, 2, 3],
+      [1, 10, 8, 8],   // upper-left block
+      [1, 10, 4, 8],
+      [1, 15, 8, 3],
+      [9, 13, 3, 5],
+      [14, 1, 4, 5],   // lower-right block
+      [18, 1, 7, 4],
+      [21, 1, 4, 8],
+      [14, 13, 3, 5],  // upper-right block
+      [17, 10, 8, 8],
+      [17, 14, 8, 4],
+      [17, 10, 4, 8],
+    ];
+
+    // Two walls in the lower-right that are single lines rather than rectangles.
+    // Vertical: east side of column 16, HeroScribe rows 6–8.
+    // Horizontal: north side of HeroScribe row 8, columns 17–20.
+    const CLASSIC_EXTRA_WALLS = [
+      { dir: "v", col: 16, row: 6, length: 3 },
+      { dir: "h", col: 17, row: 8, length: 4 },
+    ];
+
+    const SIDES = ["north", "east", "south", "west"];
+    const STEP = {
+      north: { dc: 0, dr: -1 },
+      south: { dc: 0, dr: 1 },
+      east: { dc: 1, dr: 0 },
+      west: { dc: -1, dr: 0 },
+    };
+    const OPPOSITE = { north: "south", south: "north", east: "west", west: "east" };
+
+    function emptyWalls() {
+      return { north: false, east: false, south: false, west: false };
+    }
+
+    // HeroScribe rank (0 at the logo) to this file's row (0 at the top of the image).
+    function imageRowFromClassic(classicRow) {
+      return ROWS - 1 - classicRow;
+    }
+
+    function createBoard() {
+      const cells = Array.from({ length: ROWS }, (_, row) => (
+        Array.from({ length: COLS }, (_, col) => ({
+          col,
+          row,
+          isRoom: false,
+          roomId: null,
+          walls: emptyWalls(),
+        }))
+      ));
+
+      for (const [x, classicY, width, height] of CLASSIC_ROOM_RECTS) {
+        const row = imageRowFromClassic(classicY + height - 1);
+        for (let dr = 0; dr < height; dr++) {
+          for (let col = x; col < x + width; col++) {
+            cells[row + dr][col].isRoom = true;
+          }
+        }
+      }
+
+      function addWall(col, row, side) {
+        if (row < 0 || col < 0 || row >= ROWS || col >= COLS) return;
+        cells[row][col].walls[side] = true;
+        const { dc, dr } = STEP[side];
+        const neighbor = cells[row + dr] && cells[row + dr][col + dc];
+        if (neighbor) neighbor.walls[OPPOSITE[side]] = true;
+      }
+
+      for (let col = 0; col < COLS; col++) {
+        addWall(col, 0, "north");
+        addWall(col, ROWS - 1, "south");
+      }
+      for (let row = 0; row < ROWS; row++) {
+        addWall(0, row, "west");
+        addWall(COLS - 1, row, "east");
+      }
+
+      for (const [x, classicY, width, height] of CLASSIC_ROOM_RECTS) {
+        const north = imageRowFromClassic(classicY + height - 1);
+        const south = imageRowFromClassic(classicY);
+        for (let col = x; col < x + width; col++) {
+          addWall(col, north, "north");
+          addWall(col, south, "south");
+        }
+        for (let row = north; row <= south; row++) {
+          addWall(x, row, "west");
+          addWall(x + width - 1, row, "east");
+        }
+      }
+
+      for (const wall of CLASSIC_EXTRA_WALLS) {
+        for (let i = 0; i < wall.length; i++) {
+          if (wall.dir === "v") {
+            addWall(wall.col, imageRowFromClassic(wall.row + i), "east");
+          } else {
+            addWall(wall.col + i, imageRowFromClassic(wall.row), "north");
+          }
+        }
+      }
+
+      const rooms = [];
+      let nextId = 1;
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const start = cells[row][col];
+          if (!start.isRoom || start.roomId !== null) continue;
+          const id = nextId++;
+          const squares = [];
+          const stack = [start];
+          start.roomId = id;
+          while (stack.length) {
+            const cell = stack.pop();
+            squares.push({ col: cell.col, row: cell.row });
+            for (const side of SIDES) {
+              if (cell.walls[side]) continue;
+              const { dc, dr } = STEP[side];
+              const next = cells[cell.row + dr] && cells[cell.row + dr][cell.col + dc];
+              if (!next || !next.isRoom || next.roomId !== null) continue;
+              next.roomId = id;
+              stack.push(next);
+            }
+          }
+          rooms[id] = { id, squares };
+        }
+      }
+
+      return {
+        cells,
+        rooms,
+        cell(col, row) {
+          if (row < 0 || col < 0 || row >= ROWS || col >= COLS) return null;
+          return cells[row][col];
+        },
+        room(id) {
+          return rooms[id] || null;
+        },
+      };
+    }
+
+    const board = createBoard();
+
+    const canvas = document.getElementById("board");
+    const ctx = canvas.getContext("2d");
+    const image = new Image();
+    image.src = "images/board.jpeg";
+    let showGrid = true;
+    let showDebug = false;
+    let selected = null;
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(window.innerWidth * dpr);
+      canvas.height = Math.round(window.innerHeight * dpr);
+      draw();
+    }
+
+    function boardLayout() {
+      const scale = Math.min(
+        canvas.width / image.naturalWidth,
+        canvas.height / image.naturalHeight
+      );
+      const width = image.naturalWidth * scale;
+      const height = image.naturalHeight * scale;
+      const x = (canvas.width - width) / 2;
+      const y = (canvas.height - height) / 2;
+      const scaleX = width / image.naturalWidth;
+      const scaleY = height / image.naturalHeight;
+      return {
+        x,
+        y,
+        width,
+        height,
+        gridX: x + GRID.x * scaleX,
+        gridY: y + GRID.y * scaleY,
+        gridW: GRID.width * scaleX,
+        gridH: GRID.height * scaleY,
+      };
+    }
+
+    function squareLabel(col, row) {
+      return String.fromCharCode(65 + col) + (row + 1);
+    }
+
+    function drawGrid(layout) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
+      ctx.lineWidth = Math.max(1, window.devicePixelRatio || 1);
+      for (let col = 0; col <= COLS; col++) {
+        const lineX = layout.gridX + (layout.gridW * col) / COLS;
+        ctx.moveTo(lineX, layout.gridY);
+        ctx.lineTo(lineX, layout.gridY + layout.gridH);
+      }
+      for (let row = 0; row <= ROWS; row++) {
+        const lineY = layout.gridY + (layout.gridH * row) / ROWS;
+        ctx.moveTo(layout.gridX, lineY);
+        ctx.lineTo(layout.gridX + layout.gridW, lineY);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawDebug(layout) {
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = "rgba(255, 45, 45, 0.95)";
+      ctx.lineWidth = Math.max(2, (window.devicePixelRatio || 1) * 2);
+      ctx.lineCap = "square";
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const walls = board.cells[row][col].walls;
+          const x = layout.gridX + col * cellW;
+          const y = layout.gridY + row * cellH;
+          if (walls.north && (row === 0 || !board.cells[row - 1][col].walls.south)) {
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + cellW, y);
+          }
+          if (walls.west && (col === 0 || !board.cells[row][col - 1].walls.east)) {
+            ctx.moveTo(x, y);
+            ctx.lineTo(x, y + cellH);
+          }
+          if (walls.south) {
+            ctx.moveTo(x, y + cellH);
+            ctx.lineTo(x + cellW, y + cellH);
+          }
+          if (walls.east) {
+            ctx.moveTo(x + cellW, y);
+            ctx.lineTo(x + cellW, y + cellH);
+          }
+        }
+      }
+      ctx.stroke();
+
+      ctx.font = `bold ${Math.max(10, cellH * 0.42)}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = Math.max(2, (window.devicePixelRatio || 1) * 1.5);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.fillStyle = "#ffffff";
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const roomId = board.cells[row][col].roomId;
+          if (roomId === null) continue;
+          const x = layout.gridX + (col + 0.5) * cellW;
+          const y = layout.gridY + (row + 0.5) * cellH;
+          ctx.strokeText(String(roomId), x, y);
+          ctx.fillText(String(roomId), x, y);
+        }
+      }
+      ctx.restore();
+    }
+
+    function drawHighlight(layout) {
+      if (!selected) return;
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      const x = layout.gridX + selected.col * cellW;
+      const y = layout.gridY + selected.row * cellH;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 214, 0, 0.45)";
+      ctx.strokeStyle = "#ffe14a";
+      ctx.lineWidth = Math.max(2, (window.devicePixelRatio || 1) * 2);
+      ctx.fillRect(x, y, cellW, cellH);
+      ctx.strokeRect(x, y, cellW, cellH);
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!image.complete || image.naturalWidth === 0) return;
+
+      const layout = boardLayout();
+      ctx.drawImage(image, layout.x, layout.y, layout.width, layout.height);
+      if (showGrid) drawGrid(layout);
+      if (showDebug) drawDebug(layout);
+      drawHighlight(layout);
+    }
+
+    canvas.addEventListener("click", (event) => {
+      if (!image.complete || image.naturalWidth === 0) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const px = (event.clientX - rect.left) * (canvas.width / rect.width);
+      const py = (event.clientY - rect.top) * (canvas.height / rect.height);
+      const layout = boardLayout();
+      const col = Math.floor((px - layout.gridX) / (layout.gridW / COLS));
+      const row = Math.floor((py - layout.gridY) / (layout.gridH / ROWS));
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+
+      selected = { col, row };
+      const cell = board.cell(col, row);
+      console.log(squareLabel(col, row), {
+        isRoom: cell.isRoom,
+        roomId: cell.roomId,
+        walls: { ...cell.walls },
+      });
+      draw();
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (event.repeat) return;
+      if (event.key === "g" || event.key === "G") {
+        showGrid = !showGrid;
+        draw();
+      } else if (event.key === "d" || event.key === "D") {
+        showDebug = !showDebug;
+        draw();
+      }
+    });
+
+    image.addEventListener("load", draw);
+    window.addEventListener("resize", resize);
+    resize();
+  </script>
+</body>
+</html>
