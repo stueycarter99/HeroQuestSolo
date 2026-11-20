@@ -151,6 +151,7 @@
       Objective room
       <select id="objective-room">
         <option value="">None</option>
+        <option value="random">Random</option>
       </select>
     </label>
     <button id="generate-quest" type="button">Generate New Quest</button>
@@ -434,16 +435,14 @@
       ctx.restore();
     }
 
+    // Add a monster by appending one object. icon is used until image has loaded.
     const MONSTER_TYPES = [
-      { id: "skeleton", name: "Skeleton", color: "#d5dde8", letter: "S", text: "#1a1a1a" },
-      { id: "zombie", name: "Zombie", color: "#3f9a55", letter: "Z", text: "#f4fff5" },
+      { id: "skeleton", name: "Skeleton", icon: "💀", color: "#e7e1d6", image: "" },
+      { id: "zombie", name: "Zombie", icon: "🧟", color: "#3c8f4a", image: "" },
     ];
 
-    const PLACEABLE_STYLES = {
-      chest: { color: "#e2b340", letter: "C", text: "#1a1a1a" },
-      rock: { color: "#8d8478", letter: "R", text: "#1a1a1a" },
-      door: { color: "#3d9ad4", letter: "D", text: "#f4fbff" },
-    };
+    const ICON_FONT = '"Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", sans-serif';
+    const pieceImageCache = new Map();
 
     const QUEST_COUNTS = {
       easy: { doors: 24, rocks: 4, chests: 3, monsters: 6 },
@@ -794,8 +793,20 @@
       quest.monsters.length = 0;
     }
 
+    function resolveObjectiveRoom() {
+      const value = objectiveRoom.value;
+      if (value === "") return null;
+      if (value !== "random") return Number(value);
+      const ids = [];
+      for (const room of board.rooms) {
+        if (room) ids.push(room.id);
+      }
+      return ids[Math.floor(Math.random() * ids.length)];
+    }
+
     function generateQuest() {
       syncQuestSettings();
+      questSettings.objectiveRoomId = resolveObjectiveRoom();
       clearQuest();
       resetExploration();
       const counts = QUEST_COUNTS[questSettings.difficulty] || QUEST_COUNTS.normal;
@@ -808,58 +819,138 @@
         quest.rocks.length + " rocks, " +
         quest.chests.length + " chests, " +
         quest.doors.length + " doors",
-        { ...questSettings }
+        {
+          difficulty: questSettings.difficulty,
+          objectiveRoom: objectiveRoom.value === "random" ? "random" : questSettings.objectiveRoomId,
+          revealAll: questSettings.revealAll,
+        }
       );
       draw();
     }
 
-    function drawToken(cx, cy, radius, style) {
+    function pieceImage(src) {
+      if (!src) return null;
+      let entry = pieceImageCache.get(src);
+      if (!entry) {
+        const image = new Image();
+        entry = { image, ready: false };
+        image.onload = () => {
+          entry.ready = true;
+          draw();
+        };
+        image.src = src;
+        pieceImageCache.set(src, entry);
+      }
+      return entry.ready ? entry.image : null;
+    }
+
+    function drawMonster(cx, cy, size, type) {
+      const image = pieceImage(type.image);
       ctx.beginPath();
-      ctx.fillStyle = style.color;
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.arc(cx, cy, size, 0, Math.PI * 2);
+      ctx.fillStyle = type.color || "#888888";
       ctx.fill();
-      ctx.lineWidth = Math.max(1, radius * 0.12);
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.lineWidth = Math.max(2, size * 0.1);
+      ctx.strokeStyle = "#1c140c";
       ctx.stroke();
-      ctx.fillStyle = style.text;
-      ctx.font = "bold " + Math.round(radius * 1.15) + "px sans-serif";
+      if (image) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, size * 0.84, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(image, cx - size * 0.84, cy - size * 0.84, size * 1.68, size * 1.68);
+        ctx.restore();
+        return;
+      }
+      ctx.font = Math.round(size * 1.45) + "px " + ICON_FONT;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(style.letter, cx, cy + radius * 0.05);
+      ctx.fillText(type.icon || type.name.charAt(0), cx, cy + size * 0.08);
+    }
+
+    function drawChest(cx, cy, size) {
+      const width = size * 1.85;
+      const height = size * 1.45;
+      const x = cx - width / 2;
+      const y = cy - height / 2;
+      const line = Math.max(1.5, size * 0.08);
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.beginPath();
+      ctx.ellipse(cx, y + height * 0.96, width * 0.38, height * 0.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#a56b22";
+      ctx.strokeStyle = "#3a250f";
+      ctx.lineWidth = line;
+      ctx.beginPath();
+      ctx.roundRect(x, y + height * 0.4, width, height * 0.52, size * 0.14);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#e2b340";
+      ctx.beginPath();
+      ctx.roundRect(x, y + height * 0.22, width, height * 0.28, size * 0.12);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(cx, y + height * 0.3, width / 2, height * 0.2, 0, Math.PI, 0);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#3a250f";
+      ctx.fillRect(cx - size * 0.13, y + height * 0.4, size * 0.26, size * 0.32);
+      ctx.fillStyle = "#f6e27a";
+      ctx.beginPath();
+      ctx.arc(cx, y + height * 0.58, size * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawRock(cx, cy, size) {
+      function stone(x, y, rx, ry, shade) {
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fillStyle = shade;
+        ctx.fill();
+        ctx.lineWidth = Math.max(1.5, size * 0.07);
+        ctx.strokeStyle = "#241f1b";
+        ctx.stroke();
+      }
+      ctx.save();
+      stone(cx + size * 0.32, cy + size * 0.28, size * 0.62, size * 0.46, "#5e5953");
+      stone(cx - size * 0.34, cy + size * 0.12, size * 0.55, size * 0.42, "#7d766e");
+      stone(cx + size * 0.02, cy - size * 0.32, size * 0.5, size * 0.38, "#a8a096");
+      ctx.restore();
     }
 
     function drawQuest(layout) {
       const cellW = layout.gridW / COLS;
       const cellH = layout.gridH / ROWS;
-      const radius = Math.min(cellW, cellH) * 0.32;
+      const size = Math.min(cellW, cellH) * 0.36;
 
       ctx.save();
       for (const rock of quest.rocks) {
         if (rock.visible === false || !squareRevealed(rock.col, rock.row)) continue;
-        drawToken(
+        drawRock(
           layout.gridX + (rock.col + 0.5) * cellW,
           layout.gridY + (rock.row + 0.5) * cellH,
-          radius,
-          PLACEABLE_STYLES.rock
+          size
         );
       }
       for (const chest of quest.chests) {
         if (chest.visible === false || !squareRevealed(chest.col, chest.row)) continue;
-        drawToken(
+        drawChest(
           layout.gridX + (chest.col + 0.5) * cellW,
           layout.gridY + (chest.row + 0.5) * cellH,
-          radius,
-          PLACEABLE_STYLES.chest
+          size
         );
       }
       for (const monster of quest.monsters) {
         if (monster.visible === false || !squareRevealed(monster.col, monster.row)) continue;
         const type = MONSTER_TYPES.find((entry) => entry.id === monster.typeId);
         if (!type) continue;
-        drawToken(
+        drawMonster(
           layout.gridX + (monster.col + 0.5) * cellW,
           layout.gridY + (monster.row + 0.5) * cellH,
-          radius,
+          size,
           type
         );
       }
@@ -880,42 +971,228 @@
       const x = layout.gridX + door.col * cellW;
       const y = layout.gridY + door.row * cellH;
       const vertical = door.side === "east";
+      const span = (vertical ? cellH : cellW) * 0.72;
+      const thick = (vertical ? cellW : cellH) * 0.34;
       return {
         cx: vertical ? x + cellW : x + cellW / 2,
         cy: vertical ? y + cellH / 2 : y + cellH,
-        width: vertical ? cellW * 0.28 : cellW * 0.62,
-        height: vertical ? cellH * 0.62 : cellH * 0.28,
-        token: Math.min(cellW, cellH) * 0.2,
+        width: vertical ? thick : span,
+        height: vertical ? span : thick,
+        vertical,
       };
+    }
+
+    function drawWoodPanel(x, y, width, height) {
+      const radius = Math.min(width, height) * 0.16;
+      const inset = Math.min(width, height) * 0.18;
+      ctx.fillStyle = "#6e4324";
+      ctx.strokeStyle = "#2c1a0e";
+      ctx.lineWidth = Math.max(1, Math.min(width, height) * 0.08);
+      ctx.beginPath();
+      ctx.roundRect(x, y, width, height, radius);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#c4894a";
+      ctx.beginPath();
+      ctx.roundRect(x + inset, y + inset, width - inset * 2, height - inset * 2, radius * 0.6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#f0d48a";
+      ctx.beginPath();
+      const wide = width >= height;
+      ctx.arc(
+        wide ? x + width * 0.78 : x + width / 2,
+        wide ? y + height / 2 : y + height * 0.78,
+        Math.min(width, height) * 0.12,
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
     }
 
     function drawDoor(door, layout) {
       if (!doorShown(door)) return;
       const frame = doorFrame(door, layout);
-      const left = frame.cx - frame.width / 2;
-      const top = frame.cy - frame.height / 2;
-      ctx.fillStyle = PLACEABLE_STYLES.door.color;
-      if (door.open) {
-        ctx.strokeStyle = PLACEABLE_STYLES.door.color;
-        ctx.lineWidth = Math.max(2, (window.devicePixelRatio || 1) * 1.5);
-        ctx.strokeRect(left, top, frame.width, frame.height);
-      } else {
-        ctx.fillRect(left, top, frame.width, frame.height);
+      if (!door.open) {
+        drawWoodPanel(
+          frame.cx - frame.width / 2,
+          frame.cy - frame.height / 2,
+          frame.width,
+          frame.height
+        );
+        return;
       }
-      drawToken(frame.cx, frame.cy, frame.token, PLACEABLE_STYLES.door);
+
+      const jamb = Math.min(frame.width, frame.height) * 0.55;
+      ctx.fillStyle = "#3a291c";
+      if (frame.vertical) {
+        ctx.fillRect(frame.cx - frame.width / 2, frame.cy - frame.height / 2, frame.width, jamb);
+        ctx.fillRect(frame.cx - frame.width / 2, frame.cy + frame.height / 2 - jamb, frame.width, jamb);
+        const leafW = frame.height * 0.28;
+        const leafH = frame.height * 0.7;
+        drawWoodPanel(frame.cx - frame.width / 2 - leafW, frame.cy - leafH / 2, leafW, leafH);
+      } else {
+        ctx.fillRect(frame.cx - frame.width / 2, frame.cy - frame.height / 2, jamb, frame.height);
+        ctx.fillRect(frame.cx + frame.width / 2 - jamb, frame.cy - frame.height / 2, jamb, frame.height);
+        const leafW = frame.width * 0.7;
+        const leafH = frame.width * 0.28;
+        drawWoodPanel(frame.cx - leafW / 2, frame.cy - frame.height / 2 - leafH, leafW, leafH);
+      }
     }
 
     function doorAtPoint(px, py, layout) {
+      const pad = Math.min(layout.gridW / COLS, layout.gridH / ROWS) * 0.08;
       for (let i = quest.doors.length - 1; i >= 0; i--) {
         const door = quest.doors[i];
         if (!doorShown(door)) continue;
         const frame = doorFrame(door, layout);
-        const pad = frame.token * 0.35;
-        if (Math.abs(px - frame.cx) <= frame.width / 2 + pad && Math.abs(py - frame.cy) <= frame.height / 2 + pad) {
-          return door;
+        const boxes = [{ cx: frame.cx, cy: frame.cy, width: frame.width, height: frame.height }];
+        if (door.open) {
+          if (frame.vertical) {
+            const leafW = frame.height * 0.28;
+            const leafH = frame.height * 0.7;
+            boxes.push({
+              cx: frame.cx - frame.width / 2 - leafW / 2,
+              cy: frame.cy,
+              width: leafW,
+              height: leafH,
+            });
+          } else {
+            const leafW = frame.width * 0.7;
+            const leafH = frame.width * 0.28;
+            boxes.push({
+              cx: frame.cx,
+              cy: frame.cy - frame.height / 2 - leafH / 2,
+              width: leafW,
+              height: leafH,
+            });
+          }
+        }
+        for (const box of boxes) {
+          if (Math.abs(px - box.cx) <= box.width / 2 + pad && Math.abs(py - box.cy) <= box.height / 2 + pad) {
+            return door;
+          }
         }
       }
       return null;
+    }
+
+    function visibleObjectiveSquares() {
+      const room = board.room(questSettings.objectiveRoomId);
+      if (!room) return [];
+      return room.squares.filter((square) => squareRevealed(square.col, square.row));
+    }
+
+    function drawObjective(layout) {
+      const squares = visibleObjectiveSquares();
+      if (!squares.length) return;
+
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      const seen = new Set(squares.map((square) => squareKey(square.col, square.row)));
+
+      ctx.save();
+      ctx.beginPath();
+      for (const square of squares) {
+        ctx.rect(
+          layout.gridX + square.col * cellW,
+          layout.gridY + square.row * cellH,
+          cellW,
+          cellH
+        );
+      }
+      ctx.fillStyle = "rgba(226, 176, 62, 0.42)";
+      ctx.fill();
+      ctx.clip();
+
+      ctx.beginPath();
+      ctx.strokeStyle = "#f0c14a";
+      ctx.lineWidth = Math.max(4, (window.devicePixelRatio || 1) * 3);
+      for (const square of squares) {
+        const x = layout.gridX + square.col * cellW;
+        const y = layout.gridY + square.row * cellH;
+        if (!seen.has(squareKey(square.col, square.row - 1))) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + cellW, y);
+        }
+        if (!seen.has(squareKey(square.col + 1, square.row))) {
+          ctx.moveTo(x + cellW, y);
+          ctx.lineTo(x + cellW, y + cellH);
+        }
+        if (!seen.has(squareKey(square.col, square.row + 1))) {
+          ctx.moveTo(x, y + cellH);
+          ctx.lineTo(x + cellW, y + cellH);
+        }
+        if (!seen.has(squareKey(square.col - 1, square.row))) {
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y + cellH);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawObjectiveLabel(layout) {
+      const squares = visibleObjectiveSquares();
+      if (!squares.length) return;
+
+      const cellW = layout.gridW / COLS;
+      const cellH = layout.gridH / ROWS;
+      let minCol = COLS;
+      let maxCol = 0;
+      let minRow = ROWS;
+      let maxRow = 0;
+      let midCol = 0;
+      let midRow = 0;
+      for (const square of squares) {
+        minCol = Math.min(minCol, square.col);
+        maxCol = Math.max(maxCol, square.col);
+        minRow = Math.min(minRow, square.row);
+        maxRow = Math.max(maxRow, square.row);
+        midCol += square.col + 0.5;
+        midRow += square.row + 0.5;
+      }
+      midCol /= squares.length;
+      midRow /= squares.length;
+
+      let anchor = squares[0];
+      let best = Infinity;
+      for (const square of squares) {
+        const dist = (square.col + 0.5 - midCol) ** 2 + (square.row + 0.5 - midRow) ** 2;
+        if (dist < best) {
+          anchor = square;
+          best = dist;
+        }
+      }
+      const centerVisible = squares.some((square) => square.col === Math.floor(midCol) && square.row === Math.floor(midRow));
+      const wide = maxCol - minCol >= 2 && maxRow - minRow >= 1 && centerVisible;
+      const text = wide ? "OBJECTIVE" : "OBJ";
+      const fontSize = wide
+        ? Math.min(cellH * 0.62, ((maxCol - minCol + 1) * cellW * 0.9) / 6.2)
+        : Math.min(cellW, cellH) * 0.4;
+      const labelX = layout.gridX + (wide ? midCol : anchor.col + 0.5) * cellW;
+      const labelY = layout.gridY + (wide ? midRow : anchor.row + 0.5) * cellH;
+
+      ctx.save();
+      ctx.beginPath();
+      for (const square of squares) {
+        ctx.rect(
+          layout.gridX + square.col * cellW,
+          layout.gridY + square.row * cellH,
+          cellW,
+          cellH
+        );
+      }
+      ctx.clip();
+      ctx.font = "700 " + fontSize + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = Math.max(3, fontSize * 0.14);
+      ctx.strokeStyle = "rgba(28, 16, 0, 0.92)";
+      ctx.fillStyle = "#fff6d2";
+      ctx.strokeText(text, labelX, labelY);
+      ctx.fillText(text, labelX, labelY);
+      ctx.restore();
     }
 
     function drawHighlight(layout) {
@@ -938,23 +1215,23 @@
       if (questSettings.revealAll) return;
       const cellW = layout.gridW / COLS;
       const cellH = layout.gridH / ROWS;
+
       ctx.save();
-      ctx.fillStyle = "#050505";
+      ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
+      ctx.fillRect(layout.gridX, layout.gridY, layout.gridW, layout.gridH);
+
+      ctx.beginPath();
       let anyRevealed = false;
-      for (let row = 0; row < ROWS && !anyRevealed; row++) {
-        anyRevealed = explored[row].some(Boolean);
-      }
-      if (!anyRevealed) {
-        ctx.fillRect(layout.gridX, layout.gridY, layout.gridW, layout.gridH);
-      } else {
-        for (let row = 0; row < ROWS; row++) {
-          for (let col = 0; col < COLS; col++) {
-            if (explored[row][col]) continue;
-            const x = layout.gridX + col * cellW;
-            const y = layout.gridY + row * cellH;
-            ctx.fillRect(x - 0.75, y - 0.75, cellW + 1.5, cellH + 1.5);
-          }
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          if (!explored[row][col]) continue;
+          anyRevealed = true;
+          ctx.rect(layout.gridX + col * cellW, layout.gridY + row * cellH, cellW, cellH);
         }
+      }
+      if (anyRevealed) {
+        ctx.clip();
+        ctx.drawImage(image, layout.x, layout.y, layout.width, layout.height);
       }
       ctx.restore();
     }
@@ -968,8 +1245,10 @@
       drawFog(layout);
       if (showGrid) drawGrid(layout);
       if (showDebug) drawDebug(layout);
+      drawObjective(layout);
       drawHighlight(layout);
       drawQuest(layout);
+      drawObjectiveLabel(layout);
     }
 
     canvas.addEventListener("click", (event) => {
@@ -1024,7 +1303,9 @@
 
     function syncQuestSettings() {
       questSettings.difficulty = document.querySelector('input[name="difficulty"]:checked').value;
-      questSettings.objectiveRoomId = objectiveRoom.value === "" ? null : Number(objectiveRoom.value);
+      if (objectiveRoom.value !== "random") {
+        questSettings.objectiveRoomId = objectiveRoom.value === "" ? null : Number(objectiveRoom.value);
+      }
       questSettings.revealAll = revealAll.checked;
     }
 
